@@ -14,6 +14,7 @@
 ///
 /// MODIFICATION HISTORY :
 ///     1.0         Apr-2021     First Version
+///     1.2         Jul-2021     Add reject logic for alert2 (specific dealer_id/location_id)
 ///
 ///
 #ifndef __UNIDEN_REP_H__
@@ -24,7 +25,7 @@
 #endif
 
 #define _APP_NAME_              "uniden_rep"
-#define _APP_VERS_              "1.1"
+#define _APP_VERS_              "1.2"
 
 
 // ----- INI Parameters -----
@@ -103,6 +104,7 @@ typedef enum {
     E_F_MAIL_APP,
     E_F_PRETTY_FILE,
     E_F_PROMO_FMC,
+    E_F_LOCATION_ID,
     E_NO_INI_CMN_CONF
 } E_INI_CMN_CONF;
 

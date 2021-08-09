@@ -14,6 +14,7 @@
 ///
 /// MODIFICATION HISTORY :
 ///     1.0         Apr-2021     First Version
+///     1.2         Jul-2021     Add reject logic for alert2 (specific dealer_id/location_id)
 ///
 ///
 
@@ -109,7 +110,8 @@ const char gszIniKeyCmnConf[E_NO_INI_CMN_CONF][SIZE_ITEM_T] = {
     "BC_ALERT_DAY_FILE",
     "SEND_MAIL_APP",
     "PRETTY_PAT_FILE",
-    "PROMOTION_FMC_FILE"
+    "PROMOTION_FMC_FILE",
+    "LOCATION_ID_FILE"
 };
 
 const char gszIniKeyAlert[E_NO_INI_ALRT][SIZE_ITEM_T] = {
@@ -534,7 +536,7 @@ void printUsage()
     fprintf(stderr, "\n");
 
 }
-
+#if 0
 int validateIni()
 {
     int i, result = SUCCESS;
@@ -837,6 +839,289 @@ int validateIni()
     return result;
 
 }
+#endif
+
+int validateIni()
+{
+    int i, result = SUCCESS;
+
+    // Logger parameter validation and set default if any ...
+    if ( access(gszIniValLogger[E_C_LOG_DIR], F_OK|R_OK) != SUCCESS ) {
+        fprintf(stderr, "[%s] %s: unable to access %s (%s), using running dir\n", gszIniKeySec[E_LOGGER], gszIniKeyLogger[E_C_LOG_DIR], gszIniValLogger[E_C_LOG_DIR], strerror(errno));
+        writeLog(LOG_WRN, "[%s] %s: unable to access %s (%s), using running dir", gszIniKeySec[E_LOGGER], gszIniKeyLogger[E_C_LOG_DIR], gszIniValLogger[E_C_LOG_DIR], strerror(errno));
+    }
+
+    if ( atoi(gszIniValLogger[E_C_LOG_LVL]) < 0 ) {
+        fprintf(stderr, "[%s] %s: invalid log level of %s, set default to %d (0-7)\n", gszIniKeySec[E_LOGGER], gszIniKeyLogger[E_C_LOG_LVL], gszIniValLogger[E_C_LOG_LVL], LOG_INF);
+        writeLog(LOG_WRN, "[%s] %s: invalid log level of %s, set default to %d (0-7)", gszIniKeySec[E_LOGGER], gszIniKeyLogger[E_C_LOG_LVL], gszIniValLogger[E_C_LOG_LVL], LOG_INF);
+        sprintf(gszIniValLogger[E_C_LOG_LVL], "%d", LOG_INF);
+    }
+
+    // Common parameter validation ...
+    for ( i=0; i<E_NO_INI_CMN_CONF; i++ ) {
+        if ( access(gszIniValCmnConf[i], F_OK|R_OK) != SUCCESS ) {
+            fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_COMMON_CONFIG], gszIniKeyCmnConf[i], gszIniValCmnConf[i], strerror(errno));
+            writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_COMMON_CONFIG], gszIniKeyCmnConf[i], gszIniValCmnConf[i], strerror(errno));
+            result = FAILED;
+        }
+    }
+
+    if ( access(gszIniValLkup[E_L_SQ_FILE_DIR], F_OK|R_OK) != SUCCESS ) {
+        fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_FILE_DIR], gszIniValLkup[E_L_SQ_FILE_DIR], strerror(errno));
+        writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_FILE_DIR], gszIniValLkup[E_L_SQ_FILE_DIR], strerror(errno));
+        result = FAILED;
+    }
+
+    // MTC usage searching back day parameter validation ...
+    int max_day;
+    int a_sch_day = atoi(gszIniValAlrt2[E_MTC_SCH_DAY]);
+    int c_sch_day = atoi(gszIniValAlrt2Ch[E_MTC_SCH_DAY]);
+    int f_sch_day = atoi(gszIniValAlrt2Fmc[E_MTC_SCH_DAY]);
+    int a4_sch_day = atoi(gszIniValAlrt4[E_MTC_SCH_DAY]);
+
+    char *ini_sec_bc, *ini_key_bc, *ini_val_bc;
+    if ( gnRunType == E_ALERT2 ) {
+        if ( a_sch_day <= 0 ) {
+            fprintf(stderr, "[%s] %s: (%s) must be greater than 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2[E_MTC_SCH_DAY]);
+            writeLog(LOG_ERR, "[%s] %s: (%s) must be greater than 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2[E_MTC_SCH_DAY]);
+            result = FAILED;
+        }
+        ini_val_bc = (char *)gszIniValAlrt2[E_RUN_BC];
+        ini_sec_bc = (char *)gszIniKeySec[E_ALERT2];
+        ini_key_bc = (char *)gszIniKeyAlert[E_RUN_BC];
+    }
+    else if ( gnRunType == E_ALERT2_CHL ) {
+        if ( c_sch_day <= 0 ) {
+            fprintf(stderr, "[%s] %s: (%s)  must be greater than 0\n", gszIniKeySec[E_ALERT2_CHL], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2Ch[E_MTC_SCH_DAY]);
+            writeLog(LOG_ERR, "[%s] %s: (%s)  must be greater than 0", gszIniKeySec[E_ALERT2_CHL], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2Ch[E_MTC_SCH_DAY]);
+            result = FAILED;
+        }
+        ini_val_bc = (char *)gszIniValAlrt2Ch[E_RUN_BC];
+        ini_sec_bc = (char *)gszIniKeySec[E_ALERT2_CHL];
+        ini_key_bc = (char *)gszIniKeyAlert[E_RUN_BC];
+    }
+    else if ( gnRunType == E_ALERT2_FMC ) {
+        if ( f_sch_day <= 0 ) {
+            fprintf(stderr, "[%s] %s: (%s)  must be greater than 0\n", gszIniKeySec[E_ALERT2_FMC], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2Fmc[E_MTC_SCH_DAY]);
+            writeLog(LOG_ERR, "[%s] %s: (%s)  must be greater than 0", gszIniKeySec[E_ALERT2_FMC], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt2Fmc[E_MTC_SCH_DAY]);
+            result = FAILED;
+        }
+        ini_val_bc = (char *)gszIniValAlrt2Fmc[E_RUN_BC];
+        ini_sec_bc = (char *)gszIniKeySec[E_ALERT2_FMC];
+        ini_key_bc = (char *)gszIniKeyAlert[E_RUN_BC];
+    }
+    else if ( gnRunType == E_ALERT4 ) {
+        if ( a4_sch_day <= 0 ) {
+            fprintf(stderr, "[%s] %s: (%s) must be greater than 0\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt4[E_MTC_SCH_DAY]);
+            writeLog(LOG_ERR, "[%s] %s: (%s) must be greater than 0", gszIniKeySec[E_ALERT4], gszIniKeyAlert[E_MTC_SCH_DAY], gszIniValAlrt4[E_MTC_SCH_DAY]);
+            result = FAILED;
+        }
+        ini_val_bc = (char *)gszIniValAlrt4[E_RUN_BC];
+        ini_sec_bc = (char *)gszIniKeySec[E_ALERT4];
+        ini_key_bc = (char *)gszIniKeyAlert[E_RUN_BC];
+    }
+
+    switch ( *ini_val_bc ) {
+        case 'Y':
+        case 'y':
+            *ini_val_bc = 'Y';
+            break;
+        case 'N':
+        case 'n':
+            *ini_val_bc = 'N';
+            break;
+        default:
+            fprintf(stderr, "[%s] %s: (%s) set default to N (Y,N)\n", ini_sec_bc, ini_key_bc, ini_val_bc);
+            writeLog(LOG_WRN, "[%s] %s: (%s) set default to N (Y,N)", ini_sec_bc, ini_key_bc, ini_val_bc);
+            break;
+    }
+
+    // MTC usage searching back day parameter validation against available data after purge day ...
+    max_day = a_sch_day;
+    if ( max_day < c_sch_day ) {
+        max_day = c_sch_day;
+    }
+    if ( max_day < f_sch_day ) {
+        max_day = f_sch_day;
+    }
+    if ( max_day < a4_sch_day ) {
+        max_day = a4_sch_day;
+    }
+    int sq_keep_day = atoi(gszIniValLkup[E_L_SQ_KEEP_DAY]);
+    if ( sq_keep_day <= 0 ) {
+        fprintf(stderr, "[%s] %s: (%s) must be greater than 0\n", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_KEEP_DAY], gszIniValLkup[E_L_SQ_KEEP_DAY]);
+        writeLog(LOG_ERR, "[%s] %s: (%s) must be greater than 0", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_KEEP_DAY], gszIniValLkup[E_L_SQ_KEEP_DAY]);
+        result = FAILED;
+    }
+    if ( sq_keep_day < max_day ) {
+        fprintf(stderr, "[%s] %s: (%s) must be greater than %s: (%d)\n", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_KEEP_DAY], gszIniValLkup[E_L_SQ_KEEP_DAY], gszIniKeyAlert[E_MTC_SCH_DAY], max_day);
+        writeLog(LOG_ERR, "[%s] %s: (%s) must be greater than %s: (%d)", gszIniKeySec[E_LOOKUP], gszIniKeyLkup[E_L_SQ_KEEP_DAY], gszIniValLkup[E_L_SQ_KEEP_DAY], gszIniKeyAlert[E_MTC_SCH_DAY], max_day);
+        result = FAILED;
+    }
+
+    for ( i=0; i<E_NO_INI_CMN_CONF; i++ ) {
+        switch ( i ) {
+            case E_RPT_PATH:
+            case E_XCL_TMPL_FILE:
+            case E_MAIL_LIST:
+            case E_TMP_DIR:
+                if ( gnRunType == E_ALERT2 && access(gszIniValAlrt2[i], F_OK|R_OK) != SUCCESS ) {
+                    fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], strerror(errno));
+                    writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], strerror(errno));
+                    result = FAILED;
+                }
+                if ( gnRunType == E_ALERT2_CHL && access(gszIniValAlrt2Ch[i], F_OK|R_OK) != SUCCESS ) {
+                    fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_ALERT2_CHL], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], strerror(errno));
+                    writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_ALERT2_CHL], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], strerror(errno));
+                    result = FAILED;
+                }
+                if ( gnRunType == E_ALERT2_FMC && access(gszIniValAlrt2Fmc[i], F_OK|R_OK) != SUCCESS ) {
+                    fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_ALERT2_FMC], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], strerror(errno));
+                    writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_ALERT2_FMC], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], strerror(errno));
+                    result = FAILED;
+                }
+                if ( gnRunType == E_ALERT4 && access(gszIniValAlrt4[i], F_OK|R_OK) != SUCCESS ) {
+                    fprintf(stderr, "[%s] %s: unable to access %s (%s)\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], strerror(errno));
+                    writeLog(LOG_ERR, "[%s] %s: unable to access %s (%s)", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], strerror(errno));
+                    result = FAILED;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+
+    char param_str[50], *item[3];
+    for ( i=0; i<E_NO_INI_CMN_CONF; i++ ) {
+        switch ( i ) {
+            case E_CQS_MAX_CHG:
+            case E_CQS_MAX_DUR:
+            case E_CQS_MAX_VOL:
+            case E_MTC_MAX_DUR:
+                memset(param_str, 0x00, sizeof(param_str));
+                if ( gnRunType == E_ALERT2 ) {
+                    strcpy(param_str, gszIniValAlrt2[i]);
+                    getTokenAll(item, 5, param_str, ',');
+                    if ( *item[1] == '\0' ) {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i]);
+                            result = FAILED;
+                        }
+                    }
+                    else {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], item[0]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], item[0]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[1]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], item[1]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i], item[1]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[0]) >= atol(item[1]) ) {
+                            fprintf(stderr, "[%s] %s: (%s) 1st term must be less than 2nd term\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) 1st term must be less than 2nd term", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2[i]);
+                            result = FAILED;
+                        }
+                    }
+                }
+                else if ( gnRunType == E_ALERT2_CHL ) {
+                    strcpy(param_str, gszIniValAlrt2Ch[i]);
+                    getTokenAll(item, 5, param_str, ',');
+                    if ( *item[1] == '\0' ) {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i]);
+                            result = FAILED;
+                        }
+                    }
+                    else {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], item[0]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], item[0]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[1]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], item[1]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i], item[1]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[0]) >= atol(item[1]) ) {
+                            fprintf(stderr, "[%s] %s: (%s) 1st term must be less than 2nd term\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) 1st term must be less than 2nd term", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Ch[i]);
+                            result = FAILED;
+                        }
+                    }
+                }
+                else if ( gnRunType == E_ALERT2_FMC ) {
+                    strcpy(param_str, gszIniValAlrt2Fmc[i]);
+                    getTokenAll(item, 5, param_str, ',');
+                    if ( *item[1] == '\0' ) {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i]);
+                            result = FAILED;
+                        }
+                    }
+                    else {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], item[0]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], item[0]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[1]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], item[1]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i], item[1]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[0]) >= atol(item[1]) ) {
+                            fprintf(stderr, "[%s] %s: (%s) 1st term must be less than 2nd term\n", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) 1st term must be less than 2nd term", gszIniKeySec[E_ALERT2], gszIniKeyAlert[i], gszIniValAlrt2Fmc[i]);
+                            result = FAILED;
+                        }
+                    }
+                }
+                else if ( gnRunType == E_ALERT4 ) {
+                    strcpy(param_str, gszIniValAlrt4[i]);
+                    getTokenAll(item, 5, param_str, ',');
+                    if ( *item[1] == '\0' ) {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: (%s) must be >= 0\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) must be >= 0", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i]);
+                            result = FAILED;
+                        }
+                    }
+                    else {
+                        if ( atol(item[0]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], item[0]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], item[0]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[1]) < 0 ) {
+                            fprintf(stderr, "[%s] %s: %s (%s) must be >= 0\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], item[1]);
+                            writeLog(LOG_ERR, "[%s] %s: %s (%s) must be >= 0", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i], item[1]);
+                            result = FAILED;
+                        }
+                        if ( atol(item[0]) >= atol(item[1]) ) {
+                            fprintf(stderr, "[%s] %s: (%s) 1st term must be less than 2nd term\n", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i]);
+                            writeLog(LOG_ERR, "[%s] %s: (%s) 1st term must be less than 2nd term", gszIniKeySec[E_ALERT4], gszIniKeyAlert[i], gszIniValAlrt4[i]);
+                            result = FAILED;
+                        }
+                    }
+                }
+                break;
+            default:
+                break;
+        }
+
+    }
+
+    return result;
+
+}
+
 
 void makeIni()
 {

@@ -14,6 +14,7 @@
 ///
 /// MODIFICATION HISTORY :
 ///     1.0         Apr-2021     First Version
+///     1.2         Jul-2021     Add reject logic for alert2 (specific dealer_id/location_id)
 ///
 ///
 #ifndef __ORA_DB_DBU_H__
@@ -51,6 +52,7 @@ typedef enum {
     E_PRT_LCK,
     E_CQS_USG,
     E_MTC_USG,
+    E_LOC_IDS,
     E_TOTAL_STAT
 } QUERY_PROC_STAT;
 
@@ -85,6 +87,7 @@ typedef enum {
     E_LUCKY_NUM,
     E_CQS_USAGE,
     E_MTC_USAGE,
+    E_LOC_REJCT,
     E_TOTAL_REJ
 } E_REJECT_TYPE;
 
@@ -164,6 +167,8 @@ int   getOrderInf(const char *mobNum, char *order_date, char *order_type);
 int   checkRejSvcPromo(int chk_type, const char *mobNum);
 
 int   checkProjFMC(const char *mobNum);
+
+int   checkDealerLocationId(const char *mobNum);
 
 int   isLuckyNum(const char *mobNum, char *is_lucky);
 
