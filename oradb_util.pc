@@ -1,0 +1,1729 @@
+///
+///
+/// FACILITY    : create unidentified subscriber report
+///
+/// FILE NAME   : oradb_util.pc
+///
+/// AUTHOR      : Thanakorn Nitipiromchai
+///
+/// CREATE DATE : 04-Feb-2021
+///
+/// CURRENT VERSION NO : 1.0
+///
+/// LAST RELEASE DATE  : Apr-2021
+///
+/// MODIFICATION HISTORY :
+///     1.0         Apr-2021     First Version
+///
+///
+#include <sqlca.h>
+#include <sqlda.h>
+#include <sqlcpr.h>
+
+#include "oradb_util.h"
+#include "uniden_rep.h"
+#include "sqlite_util.h"
+
+
+#include "procsig.h"
+
+EXEC SQL INCLUDE SQLCA;
+
+extern const char gszIniKeyCmnConf[E_NO_INI_CMN_CONF][SIZE_ITEM_T];
+extern char gszToday[SIZE_DATE_ONLY+1];
+
+char gszTmpFileName1[SIZE_ITEM_L];
+char gszTmpFileName2[SIZE_ITEM_L];
+char gszOutFileName[SIZE_ITEM_L];
+char gszTmpFileNameSme1[SIZE_ITEM_L];
+char gszTmpFileNameSme2[SIZE_ITEM_L];
+char gszOutFileNameSme[SIZE_ITEM_L];
+char gszDtmExcel[30];
+
+char gszTmpSql[SIZE_BUFF_2X];
+
+FILE *gfpSheet1;
+FILE *gfpSheet2;
+FILE *gfpSheetSme1;
+FILE *gfpSheetSme2;
+
+PROC_STAT  proc_stat[E_TOTAL_STAT];
+const char stat_name[E_TOTAL_STAT][SIZE_ITEM_T] = {
+    "PROJECT_FMC",
+    "LOOKUP_TABLE",
+    "CHK_DEALER",
+    "CHK_BIZ_ORDER",
+    "CHK_SVC_PROMO",
+    "GET_DEALER",
+    "GET_ORDER",
+    "CHK_PRETTY",
+    "CHK_LUCKY",
+    "CHK_CQS_USAGE",
+    "CHK_MTC_USAGE"
+};
+
+int gnRejCnt_ByName[E_TOTAL_REJ];
+const char rej_name[E_TOTAL_REJ][SIZE_ITEM_S] = {
+    "rej billing cycle - alert2",
+    "rej billing name",
+    "rej network type",
+    "rej dealer - channel",
+    "rej biz type - channel",
+    "rej order type",
+    "rej order date",
+    "rej service type",
+    "rej promotion",
+    "rej fmc - alert2/channel",
+    "rej pretty number",
+    "rej lucky number",
+    "rej have cqs usage",
+    "rej have mtc usage"
+};
+
+PATTERN gsPattern[MAX_PAT_ITEM];
+int gnTotalPattern;
+
+LOG_DB_INF gst_log_db;
+long glSeqNumber = -1;
+
+int connAllDb(char *szSfnUsr, char *szSfnPwd, char *szSfnSvr, char *szSffUsr, char *szSffPwd, char *szSffSvr)
+{
+    if ( connectDbSfn(szSfnUsr, szSfnPwd, szSfnSvr, 3, 60) == SUCCESS ) {
+        return connectDbSff(szSffUsr, szSffPwd, szSffSvr, 3, 60);
+    }
+    return FAILED;
+}
+
+void  discAllDb(char *szSfnSvr, char *szSffSvr)
+{
+    disconnSfn(szSfnSvr);
+    disconnSff(szSffSvr);
+}
+
+int connectDbSfn(char *szDbUsr, char *szDbPwd, char *szDbSvr, int nRetryCnt, int nRetryWait)
+{
+    int retry = nRetryCnt;
+    int result = SUCCESS;
+
+    EXEC SQL DECLARE SFN_DB DATABASE;
+    do {
+        writeLog(LOG_INF, "%sconnecting %s db ...", ( retry != nRetryCnt ? "retry " : "" ), szDbSvr);
+        EXEC SQL CONNECT :szDbUsr IDENTIFIED BY :szDbPwd AT SFN_DB USING :szDbSvr;
+        if (sqlca.sqlcode == SUCCESS) {
+            return SUCCESS;
+        }
+        else {
+            trimStr((unsigned char*)trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            writeLog(LOG_ERR, "connectDbErm failed ora(%d) - %s", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            result = FAILED;
+            sleep(nRetryWait);
+        }
+        retry--;
+    }
+    while ( retry > 0 );
+    if ( result == SUCCESS ) {
+        writeLog(LOG_INF, "%s connected", szDbSvr);
+    }
+
+    return result;
+}
+
+void disconnSfn(char *dbsvr)
+{
+    EXEC SQL AT SFN_DB COMMIT WORK RELEASE;
+    writeLog(LOG_INF, "disconnected from %s", dbsvr);
+}
+
+int connectDbSff(char *szDbUsr, char *szDbPwd, char *szDbSvr, int nRetryCnt, int nRetryWait)
+{
+    int retry = nRetryCnt;
+    int result = SUCCESS;
+
+    EXEC SQL DECLARE SFF_DB DATABASE;
+    do {
+        writeLog(LOG_INF, "%sconnecting %s db ...", ( retry != nRetryCnt ? "retry " : "" ), szDbSvr);
+        EXEC SQL CONNECT :szDbUsr IDENTIFIED BY :szDbPwd AT SFF_DB USING :szDbSvr;
+        if (sqlca.sqlcode == SUCCESS) {
+            return SUCCESS;
+        }
+        else {
+            trimStr((unsigned char*)trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            writeLog(LOG_ERR, "connectDbErm failed ora(%d) - %s", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            result = FAILED;
+            sleep(nRetryWait);
+        }
+        retry--;
+    }
+    while ( retry > 0 );
+    if ( result == SUCCESS ) {
+        writeLog(LOG_INF, "%s connected", szDbSvr);
+    }
+
+    return result;
+}
+
+void disconnSff(char *dbsvr)
+{
+    EXEC SQL AT SFF_DB COMMIT WORK RELEASE;
+    writeLog(LOG_INF, "disconnected from %s", dbsvr);
+}
+
+int procRegSub(char run_inf[][SIZE_ITEM_L], int run_type, char map_file[][SIZE_ITEM_L])
+{
+    char o_mobNum[16], o_actDate[SIZE_DATE_ONLY+1], o_bilCycle[3], o_bilStartDt[SIZE_DATE_ONLY+1];
+    char o_bilAcct[31], o_bilName[200], o_pretty = 'N';
+    char o_dealer_cd[20], o_dealer_name[200], o_channel_type[31];
+    char o_order_date[SIZE_DATE_TIME+1], o_order_type[31], o_cusCat[26], o_cusSubCat[31];
+
+    char netType[51], chgType[51];
+    char bilEndDt[SIZE_DATE_ONLY+1];
+    char billcycle_num[2], billcycle_day[2];
+    char lucky;
+
+    int nRetRecCnt = 0;
+    int rej_cnt = 0, map_cnt = 0, qry_cnt = 0, res_cnt = 0, sme_cnt = 0;
+    int nAlrtNum = 2;
+
+    FILE *fp1, *fp2;
+
+    memset(proc_stat, 0x00, sizeof(proc_stat));
+    memset(&gst_log_db, 0x00, sizeof(LOG_DB_INF));
+    memset(&gnRejCnt_ByName, 0x00, sizeof(gnRejCnt_ByName));
+
+    VARCHAR szSql[SIZE_BUFF_2X], szSqlCnt[SIZE_BUFF_2X];
+
+    if ( *run_inf[E_RUN_BC] == 'Y' ) {
+        memset(billcycle_num, 0x00, sizeof(billcycle_num));
+        memset(billcycle_day, 0x00, sizeof(billcycle_day));
+        strcpy(billcycle_day, gszToday+6);
+        getBillCycle(gszIniKeyCmnConf[E_F_BC_DAY], billcycle_day, billcycle_num);
+
+        if ( atoi(billcycle_num) <= 0 ) {
+            writeLog(LOG_INF, "today is not running day of %s of billing cycle %s", billcycle_day, billcycle_num);
+            return SUCCESS;     // not a day of running
+        }
+        writeLog(LOG_INF, "running day %s of billing cycle %s", billcycle_day, billcycle_num);
+    }
+
+    writeLog(LOG_INF, "counting registered subscribers ...");
+    switch ( run_type ) {
+        gst_log_db.lSeqNo = 0L;
+        gst_log_db.nMapRec = 0;
+        gst_log_db.nRejRec = 0;
+        case E_ALERT2:
+            strcpy(gst_log_db.szName, "Alert2");
+            nAlrtNum = 2;
+            break;
+        case E_ALERT2_CHL:
+            strcpy(gst_log_db.szName, "Alert2_Channel");
+            nAlrtNum = 2;
+            break;
+        case E_ALERT2_FMC:
+            strcpy(gst_log_db.szName, "Alert2_FMC");
+            nAlrtNum = 2;
+            break;
+        case E_ALERT4:
+            strcpy(gst_log_db.szName, "Alert4");
+            nAlrtNum = 4;
+            break;
+    }
+    //logDbUpdateInfo();
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT COUNT(1) "\
+        "FROM MOBILE_ACCOUNT A "\
+            ", BILLING_ACCOUNT B "\
+            ", CUSTOMER_ACCOUNT C "\
+        "WHERE ROUND(SYSDATE - A.ACTIVATION_DATE) %s "\
+            "AND A.BILLINGACCOUNT = B.BILLINGACCOUNT "\
+            "AND A.CUSTOMERACCOUNT = C.CUSTOMERACCOUNT "\
+            "AND A.CHARGE_TYPE = 'Post-paid' "\
+            "AND (A.STATUS = 'Active' OR A.STATUS LIKE 'Suspend%c') "\
+            "AND (C.CUSTOMERCATEGORY = 'R' OR (C.CUSTOMERCATEGORY = 'B' AND C.CUSTOMERSUBCAT = 'SME')) ", run_inf[E_ACT_DAY], PERCENT_SIGN);
+    strcpy((char*)szSqlCnt.arr, gszTmpSql);
+    szSqlCnt.len = strlen((char*)szSqlCnt.arr);
+//printf("1) [%s]\n", gszTmpSql);
+//printf("\t2) [%s]\n\n", (char*)szSqlCnt.arr);
+
+    EXEC SQL AT SFN_DB PREPARE oraCntStmt FROM :szSqlCnt;
+    EXEC SQL AT SFN_DB DECLARE oraCntCrs CURSOR FOR oraCntStmt;
+    EXEC SQL AT SFN_DB OPEN oraCntCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "procRegisSub: Ora(%d) Open oraCntCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraCntCrs;
+        sprintf(gst_log_db.szRemark, "procRegisSub: Ora(%d) Open oraCntCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        strcpy(gst_log_db.szStatus, "Fail");
+        //logDbUpdateInfo();
+        return FAILED;
+    }
+    EXEC SQL AT SFN_DB FETCH oraCntCrs INTO :nRetRecCnt;
+    EXEC SQL AT SFN_DB CLOSE oraCntCrs;
+
+    char out_fname[SIZE_ITEM_S]; memset(out_fname, 0x00, sizeof(out_fname));
+    sprintf(out_fname, "%s_%s", run_inf[E_RPT_PREFIX], getSysDTM(DTM_DATE_TIME));
+
+    strcpy(gst_log_db.szFname, out_fname);
+    strcpy(gst_log_db.szPath, run_inf[E_RPT_PATH]);
+    strcpy(gst_log_db.szStatus, "Start");
+
+    char tmp[SIZE_ITEM_L]; memset(tmp, 0x00, sizeof(tmp));
+    if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+        sprintf(tmp, "%s_XXX%s", out_fname, run_inf[E_RPT_SUFFIX]);
+    }
+    else {
+        sprintf(tmp, "%s%s", out_fname, run_inf[E_RPT_SUFFIX]);
+    }
+    logDbUpdateInfo(tmp);
+
+    openExcelFile(run_inf[E_XCL_TMPL_FILE], run_inf[E_TMP_DIR], run_inf[E_RPT_PATH], out_fname, run_inf[E_RPT_SUFFIX], run_type);
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT A.MOBILE_NO "\
+            ", A.NETWORKTYPE "\
+            ", A.CHARGE_TYPE "\
+            ", TO_CHAR(A.ACTIVATION_DATE, 'YYYYMMDD') "\
+            // ", SYSDATE - A.ACTIVATION_DATE "
+            ", B.BILLINGACCOUNT "\
+            ", TRIM(UPPER(NVL(B.BILLING_NAME, ' '))) "\
+            ", B.BILLCYCLE "\
+            ", C.CUSTOMERCATEGORY "\
+            ", C.CUSTOMERSUBCAT "\
+        "FROM MOBILE_ACCOUNT A "\
+            ", BILLING_ACCOUNT B "\
+            ", CUSTOMER_ACCOUNT C "\
+        "WHERE ROUND(SYSDATE - A.ACTIVATION_DATE) %s "\
+            "AND A.BILLINGACCOUNT = B.BILLINGACCOUNT "\
+            "AND A.CUSTOMERACCOUNT = C.CUSTOMERACCOUNT "\
+            "AND A.CHARGE_TYPE = 'Post-paid' "\
+            "AND (C.CUSTOMERCATEGORY = 'R' OR (C.CUSTOMERCATEGORY = 'B' AND C.CUSTOMERSUBCAT = 'SME')) "\
+            "AND (A.STATUS = 'Active' OR A.STATUS LIKE 'Suspend%c') ", run_inf[E_ACT_DAY], PERCENT_SIGN);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+//printf("1) [%s]\n", gszTmpSql);
+//printf("\t2) [%s]\n\n", (char*)szSql.arr);
+    writeLog(LOG_DB1, "procRegSub: %s", gszTmpSql);
+
+    if ( nRetRecCnt == 0 ) {
+        writeLog(LOG_WRN, "no record to be processed");
+        goto _NO_DATA_FOUND_;
+    }
+    writeLog(LOG_INF, "total records to be processed %d", nRetRecCnt);
+
+    writeLog(LOG_INF, "preparing registered subscribers for checking ...");
+    EXEC SQL AT SFN_DB PREPARE oraSubStmt FROM :szSql;
+    EXEC SQL AT SFN_DB DECLARE oraSubCrs CURSOR FOR oraSubStmt;
+    EXEC SQL AT SFN_DB OPEN oraSubCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "procRegisSub: Ora(%d) Open oraSubCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraSubCrs;
+        sprintf(gst_log_db.szRemark, "procRegisSub: Ora(%d) Open oraSubCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        strcpy(gst_log_db.szStatus, "Fail");
+        logDbUpdateInfo("");
+        return FAILED;
+    }
+
+    while ( TRUE ) {
+
+        memset(o_mobNum,  0x00, sizeof(o_mobNum));
+        memset(netType, 0x00, sizeof(netType));
+        memset(chgType, 0x00, sizeof(chgType));
+        memset(o_bilAcct, 0x00, sizeof(o_bilAcct));
+        memset(o_bilName, 0x00, sizeof(o_bilName));
+        memset(o_bilCycle, 0x00, sizeof(o_bilCycle));
+        memset(o_actDate, 0x00, sizeof(o_actDate));
+        memset(o_cusCat,  0x00, sizeof(o_cusCat));
+        memset(o_cusSubCat, 0x00, sizeof(o_cusSubCat));
+
+        if ( isTerminated() == TRUE ) {
+            break;
+        }
+
+        EXEC SQL AT SFN_DB FETCH oraSubCrs INTO
+            :o_mobNum,
+            :netType,
+            :chgType,
+            :o_actDate,
+            :o_bilAcct,
+            :o_bilName,
+            :o_bilCycle,
+            :o_cusCat,
+            :o_cusSubCat;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+        qry_cnt++;
+
+        if ( qry_cnt % 2000 == 0  ) {
+            writeLog(LOG_INF, "processed %d of %d", qry_cnt, nRetRecCnt);
+            gst_log_db.nMapRec = map_cnt;
+            gst_log_db.nRejRec = rej_cnt;
+            strcpy(gst_log_db.szStatus, "Proc");
+            logDbUpdateInfo("");
+        }
+
+       trimStr(o_mobNum);
+       trimStr(netType);
+       trimStr(chgType);
+       trimStr(o_bilAcct);
+        //strcpy(o_bilName,   trimStr(o_bilName));
+//printf("'%s', '%s', '%s'\n", o_bilName, trimStr(o_bilName), o_bilName);
+        trimStr(o_bilName);
+        trimStr(o_bilCycle);
+        trimStr(o_actDate);
+        trimStr(o_cusCat);
+        trimStr(o_cusSubCat);
+        writeLog(LOG_DB3, "gszTmpSql qry rec: '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s'",
+                o_mobNum,
+                netType,
+                chgType,
+                o_bilAcct,
+                o_bilName,
+                o_bilCycle,
+                o_actDate,
+                o_cusCat,
+                o_cusSubCat);
+
+        if ( *run_inf[E_RUN_BC] == 'Y' && strcmp(o_bilCycle, billcycle_num) != 0 ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s billing cycle not matched %s: %s", o_mobNum, o_bilCycle, billcycle_num);
+            rej_cnt++;
+            gnRejCnt_ByName[E_BILL_CYCL]++;
+            continue;
+        }
+
+        if ( lookupMapTable(gszIniKeyCmnConf[E_F_BIL_NAME], o_bilName) > 0 ) {    // FOUND in Table -> skip
+            writeLog(LOG_DB2, "procRegSub-reject: %s billing name %s", o_mobNum, o_bilName);
+            rej_cnt++;
+            gnRejCnt_ByName[E_BILL_NAME]++;
+            continue;
+        }
+
+        if ( lookupMapTable(gszIniKeyCmnConf[E_F_NET_TYPE], netType) <= 0 )    {   // Not Found in Table -> skip (keep only found)
+            writeLog(LOG_DB2, "procRegSub-reject: %s network type %s", o_mobNum, netType);
+            rej_cnt++;
+            gnRejCnt_ByName[E_NETW_TYPE]++;
+            continue;
+        }
+
+        if ( run_type == E_ALERT2_CHL ) {
+            memset(o_dealer_cd, 0x00, sizeof(o_dealer_cd));
+            memset(o_dealer_name, 0x00, sizeof(o_dealer_name));
+            memset(o_channel_type, 0x00, sizeof(o_channel_type));
+            if ( checkDealer(o_mobNum, o_dealer_cd, o_dealer_name) == SUCCESS ) {  // found
+                if ( checkRejBizOrd(E_F_BIZ_TYPE, o_dealer_cd, map_file[E_F_BIZ_TYPE], o_channel_type) != SUCCESS ) {   // not found
+                    writeLog(LOG_DB2, "procRegSub-reject: %s dealer code %s and biz type not matched condition", o_mobNum, o_dealer_cd);
+                    rej_cnt++;
+                    gnRejCnt_ByName[E_CHNL_BIZT]++;
+                    continue;
+                }
+                if ( strncasecmp(o_channel_type, "VAN", 3) == 0 ) {
+                    strcpy(o_channel_type, "VAN");
+                }
+            }
+            else {
+                writeLog(LOG_DB2, "procRegSub-reject: %s dealer code not matched condition", o_mobNum);
+                rej_cnt++;
+                gnRejCnt_ByName[E_CHNL_DEAL]++;
+                continue;   // Not found
+            }
+        }
+
+        if ( checkRejBizOrd(E_F_ORD_TYPE, o_mobNum, map_file[E_F_ORD_TYPE], NULL) == SUCCESS ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s with order type in config file", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_ORDR_TYPE]++;
+            continue;
+        }
+
+        if ( checkRejSvcPromo(E_F_SERVICE, o_mobNum) == SUCCESS ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s with service in config file", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_SERV_TYPE]++;
+            continue;
+        }
+
+        if ( run_type != E_ALERT2_FMC ) {
+            if ( checkRejSvcPromo(E_F_PROMO, o_mobNum) == SUCCESS ) {
+                writeLog(LOG_DB2, "procRegSub-reject: %s with promotion in config file", o_mobNum);
+                rej_cnt++;
+                gnRejCnt_ByName[E_PROMOTION]++;
+                continue;
+            }
+
+            if ( checkProjFMC(o_mobNum) == SUCCESS ) {
+                writeLog(LOG_DB2, "procRegSub-reject: %s is FMC project", o_mobNum);
+                rej_cnt++;
+                gnRejCnt_ByName[E_A2_CH_FMC]++;
+                continue;
+            }
+        }
+        else {
+            if ( checkRejSvcPromo(E_F_PROMO_FMC, o_mobNum) == SUCCESS ) {
+                writeLog(LOG_DB2, "procRegSub-reject: %s with promotion FMC in config file", o_mobNum);
+                rej_cnt++;
+                gnRejCnt_ByName[E_PROMOTION]++;
+                continue;
+            }
+#if 0
+            if ( checkProjFMC(o_mobNum) != SUCCESS ) {
+                writeLog(LOG_DB2, "procRegSub-reject: %s is not FMC project", o_mobNum);
+                rej_cnt++;
+                gnRejCnt_ByName[E_A2_CH_FMC]++;
+                continue;
+            }
+#endif
+        }
+#if 0
+        memset(o_dealer_cd, 0x00, sizeof(o_dealer_cd));
+        memset(o_dealer_name, 0x00, sizeof(o_dealer_name));
+        getDealer(o_mobNum, o_dealer_cd, o_dealer_name);
+#endif
+        memset(o_order_date, 0x00, sizeof(o_order_date));
+        memset(o_order_type, 0x00, sizeof(o_order_type));
+        if ( getOrderInf(o_mobNum, o_order_date, o_order_type) != SUCCESS ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s with order date is too old", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_ORDR_DATE]++;
+            continue;
+        }
+
+        memset(o_bilStartDt, 0x00, sizeof(o_bilStartDt)); memset(bilEndDt, 0x00, sizeof(bilEndDt));
+        calcBillDate(o_bilStartDt, bilEndDt, atoi(o_bilCycle), 0);
+
+        isPrettyNum(o_mobNum, &o_pretty);
+        if ( o_pretty == 'Y' ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s with pretty number", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_PRTTY_NUM]++;
+            continue;
+        }
+
+        isLuckyNum(o_mobNum, &lucky);
+        if ( lucky == 'Y' ) {
+            writeLog(LOG_DB2, "procRegSub-reject: %s with lucky number", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_LUCKY_NUM]++;
+            continue;
+        }
+
+        if ( checkCqsUsage(o_mobNum, run_inf) == SUCCESS ) {    // found usage
+            writeLog(LOG_DB2, "procRegSub-reject: %s with have cqs usage", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_CQS_USAGE]++;
+            continue;
+        }
+
+        // atoi(run_inf[E_MTC_SCH_DAY])+1 ==> plus one because its today inclusive
+        if ( haveUsageMtc(o_mobNum, gszToday, run_inf[E_MTC_MAX_DUR], atoi(run_inf[E_MTC_SCH_DAY])+1) == SUCCESS ) { // found usage
+            writeLog(LOG_DB2, "procRegSub-reject: %s with have mtc usage", o_mobNum);
+            rej_cnt++;
+            gnRejCnt_ByName[E_MTC_USAGE]++;
+            continue;
+        }
+
+        map_cnt++;
+
+        if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+            if ( *o_cusCat == 'R' ) {
+                fp1 = gfpSheet1;
+                fp2 = gfpSheet2;
+                res_cnt++;
+            }
+            else {
+                fp1 = gfpSheetSme1;
+                fp2 = gfpSheetSme2;
+                sme_cnt++;
+            }
+        }
+        else {
+            fp1 = gfpSheet1;
+            fp2 = gfpSheet2;
+        }
+
+//printf("current: map %d out of %d, reject %d", map_cnt, qry_cnt, rej_cnt);
+        // Sheet 1
+        fprintf(fp1, "%s\n", START_ROW_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_mobNum, END_COL_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_DTM_TAG, changeDateFoExcel(o_actDate), END_COL_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_INT_TAG, o_bilCycle, END_COL_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_DTM_TAG, changeDateFoExcel(o_bilStartDt), END_COL_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_bilAcct, END_COL_TAG);
+            fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_bilName, END_COL_TAG);
+            fprintf(fp1, "%s%c%s\n", START_COL_STR_TAG, o_pretty, END_COL_TAG);
+//printf("%s|%s|%s|%s|%s|%s|%s\n", o_mobNum, changeDateFoExcel(o_actDate), o_bilCycle, changeDateFoExcel(o_bilStartDt), o_bilAcct, o_bilName, o_pretty);
+            if ( run_type == E_ALERT2_CHL ) {
+                fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_dealer_cd, END_COL_TAG);
+                fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_dealer_name, END_COL_TAG);
+                fprintf(fp1, "%s%s%s\n", START_COL_STR_TAG, o_channel_type, END_COL_TAG);
+//printf("|%s|%s|%s\n", o_dealer_cd, o_dealer_name, o_channel_type);
+            }
+        fprintf(fp1, "%s\n", END_ROW_TAG);
+
+        // Sheet 2
+        fprintf(fp2, "%s\n", START_ROW_TAG);
+            fprintf(fp2, "%s%s%s\n", START_COL_STR_TAG, o_mobNum, END_COL_TAG);
+//printf("o_order_date = '%s', changeDateFoExcel = '%s'\n", o_order_date, changeDateFoExcel(o_order_date));
+            fprintf(fp2, "%s%s%s\n", START_COL_DTM_TAG, changeDateFoExcel(o_order_date), END_COL_TAG);
+            fprintf(fp2, "%s%s%s\n", START_COL_STR_TAG, o_order_type, END_COL_TAG);
+            fprintf(fp2, "%s%s%s\n", START_COL_STR_TAG, o_cusCat, END_COL_TAG);
+            fprintf(fp2, "%s%s%s\n", START_COL_STR_TAG, o_cusSubCat, END_COL_TAG);
+//printf("\t%s|%s|%s|%s|%s\n", o_mobNum,changeDateFoExcel(o_order_date),o_order_type,o_cusCat,o_cusSubCat);
+        fprintf(fp2, "%s\n", END_ROW_TAG);
+
+    }   /* End of outer while loop (1) */
+    EXEC SQL AT SFN_DB CLOSE oraSubCrs;
+
+_NO_DATA_FOUND_:
+
+    if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+        if ( res_cnt <= 0 ) {
+            fprintf(gfpSheet1, "%s\n", NO_DATA_FOUND);
+            fprintf(gfpSheet2, "%s\n", NO_DATA_FOUND_SHEET2);
+        }
+        if ( sme_cnt <= 0 ) {
+            fprintf(gfpSheetSme1, "%s\n", NO_DATA_FOUND);
+            fprintf(gfpSheetSme2, "%s\n", NO_DATA_FOUND_SHEET2);
+        }
+    }
+    else {
+        if ( map_cnt <= 0 ) {
+            if ( run_type = E_ALERT2_CHL ) {
+                fprintf(gfpSheet1, "%s\n", NO_DATA_FOUND_CHANNEL);
+            }
+            else {
+                fprintf(gfpSheet1, "%s\n", NO_DATA_FOUND);
+            }
+            fprintf(gfpSheet2, "%s\n", NO_DATA_FOUND_SHEET2);
+        }
+    }
+
+    writeLog(LOG_INF, "gen report done. total read %d, reject %d, mapped %d (res %d, sme %d)", qry_cnt, rej_cnt, map_cnt, res_cnt, sme_cnt);
+    closeExcelFile(run_type);
+
+    gst_log_db.nMapRec = map_cnt;
+    gst_log_db.nRejRec = rej_cnt;
+    strcpy(gst_log_db.szStatus, "Success");
+    logDbUpdateInfo("");
+
+    // Prepare mail message
+    char szSubject[SIZE_ITEM_M], szContent[SIZE_ITEM_X];
+    char cont_file[SIZE_ITEM_L], cmd[SIZE_ITEM_X];
+    memset(szSubject, 0x00, sizeof(szSubject));
+    memset(szContent, 0x00, sizeof(szContent));
+    memset(cont_file, 0x00, sizeof(cont_file));
+
+    char full_res_name[SIZE_ITEM_L], full_sme_name[SIZE_ITEM_L];
+    memset(full_res_name, 0x00, sizeof(full_res_name));
+    memset(full_sme_name, 0x00, sizeof(full_sme_name));
+    if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+        sprintf(full_res_name, "%s%s%s", gst_log_db.szFname, ALRT2_RES, run_inf[E_RPT_SUFFIX]);
+        sprintf(full_sme_name, "%s%s%s", gst_log_db.szFname, ALRT2_SME, run_inf[E_RPT_SUFFIX]);
+        sprintf(szSubject, MAIL_SUBJ_ALRT2, nAlrtNum, billcycle_num, gszToday);
+        sprintf(szContent, MAIL_CONT_ALRT2, nAlrtNum, billcycle_num, gszToday, full_res_name, res_cnt, full_sme_name, sme_cnt);
+        sprintf(cont_file, "%s/content_alert%d_%s.txt", run_inf[E_TMP_DIR], nAlrtNum, gszToday);
+    }
+    else if ( run_type == E_ALERT2_CHL ) {
+        sprintf(full_res_name, "%s%s", gst_log_db.szFname, run_inf[E_RPT_SUFFIX]);
+        sprintf(szSubject, MAIL_SUBJ, "Channel", gszToday);
+        sprintf(szContent, MAIL_CONT, "Channel", gszToday, full_res_name, map_cnt);
+        sprintf(cont_file, "%s/content_channel_%s.txt", run_inf[E_TMP_DIR], gszToday);
+    }
+    else {
+        sprintf(full_res_name, "%s%s", gst_log_db.szFname, run_inf[E_RPT_SUFFIX]);
+        sprintf(szSubject, MAIL_SUBJ, "FMC", gszToday);
+        sprintf(szContent, MAIL_CONT, "FMC", gszToday, full_res_name, map_cnt);
+        sprintf(cont_file, "%s/content_fmc_%s.txt", run_inf[E_TMP_DIR], gszToday);
+    }
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "echo '%s' > %s", szContent, cont_file);
+    system(cmd);
+    sendMail(szSubject, cont_file, gszOutFileName, gszOutFileNameSme, run_inf[E_MAIL_LIST], map_file[E_F_MAIL_APP]);
+    unlink(cont_file);
+
+    int i=0;
+    for ( i=0; i<E_TOTAL_STAT; i++ ) {
+        long divider = ( proc_stat[i].n_call_count == 0 ? 1 : proc_stat[i].n_call_count );
+        writeLog(LOG_DB1, "   stat %-17s call %8d, time used %8d ms (avg/call %10.3f ms)"
+            , stat_name[i]
+            , proc_stat[i].n_call_count
+            , proc_stat[i].l_sum_use_ms
+            , ((float)proc_stat[i].l_sum_use_ms/divider));
+    }
+
+    for ( i=0; i<E_TOTAL_REJ; i++ ) {
+        writeLog(LOG_INF, "   %-30s: %8d", rej_name[i], gnRejCnt_ByName[i]);
+    }
+
+    return SUCCESS;
+}
+
+int checkDealer(const char *mobNum, char *dealer_cd, char *dealer_name)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_DEA_LER].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    char dealer[11], dealer_n[101];
+    VARCHAR szSql[SIZE_BUFF_2X];
+
+    // MOBILE_NO, SIEBELORDERTYPE, DEALER_CODE, DEALER_NAME
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT NVL(DEALER_CODE, ''), NVL(DEALER_NAME, '') "\
+        "FROM   ORDER_MASTER "\
+        "WHERE "\
+        "MOBILE_NO = '%s' "\
+        "AND SIEBELORDERTYPE IN ('New Registration', 'Change Charge Type', 'Port - In') "\
+        "AND SYSDATE - RECORDDATE <= 45 AND CHARGE_TYPE = 'Post-paid' "\
+        "AND DEALER_NAME LIKE 'VAN%c' ", mobNum, PERCENT_SIGN);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+//printf("1) [%s]\n", gszTmpSql);
+//printf("\t2) [%s]\n\n", (char*)szSql.arr);
+
+    EXEC SQL AT SFN_DB PREPARE oraDlrStmt FROM :szSql;
+    EXEC SQL AT SFN_DB DECLARE oraDlrCrs CURSOR FOR oraDlrStmt;
+    EXEC SQL AT SFN_DB OPEN oraDlrCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "checkDealer: Ora(%d) Open oraSubCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraDlrCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_DEA_LER].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+
+    while ( TRUE ) {
+        memset(dealer, 0x00, sizeof(dealer));
+        memset(dealer_n, 0x00, sizeof(dealer_n));
+        EXEC SQL AT SFN_DB FETCH oraDlrCrs INTO :dealer, :dealer_n;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+
+        strcpy(dealer_cd, trimStr(dealer));
+        strcpy(dealer_name, trimStr(dealer_n));
+        break;
+    }
+    EXEC SQL AT SFN_DB CLOSE oraDlrCrs;
+    if ( *dealer_cd == '\0' ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_DEA_LER].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_DEA_LER].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return SUCCESS;
+
+}
+
+int getDealer(const char *mobNum, char *dealer_cd, char *dealer_name)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_GET_DLR].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    char code[20], name[200];
+    VARCHAR szSql[SIZE_BUFF_2X];
+    int result = FAILED;
+
+    // MOBILE_NO, SIEBELORDERTYPE, DEALER_CODE, DEALER_NAME
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT COALESCE(DEALER_CODE, LOCATION_CD) AS DEALER_CODE, "\
+        "COALESCE(DEALER_NAME, LOCATION_NAME) AS DEALER_NAME "\
+        "FROM ORDER_MASTER "\
+        "WHERE MOBILE_NO = '%s' ", mobNum);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+
+    EXEC SQL AT SFN_DB PREPARE oraGetStmt FROM :szSql;
+    EXEC SQL AT SFN_DB DECLARE oraGetCrs CURSOR FOR oraGetStmt;
+    EXEC SQL AT SFN_DB OPEN oraGetCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "getDealer: Ora(%d) Open oraSubCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraGetCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_GET_DLR].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return result;
+    }
+
+    while ( TRUE ) {
+        memset(code, 0x00, sizeof(code));
+        memset(name, 0x00, sizeof(name));
+        EXEC SQL AT SFN_DB FETCH oraGetCrs INTO :code, :name;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+
+        strcpy(dealer_cd, trimStr(code));
+        strcpy(dealer_name, trimStr(name));
+        result = SUCCESS;
+        break;
+    }
+    EXEC SQL AT SFN_DB CLOSE oraGetCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_GET_DLR].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return result;
+}
+
+int checkRejBizOrd(int chk_type, const char *key, const char *map_file, char *channel_type)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_BIZ_ORD].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    VARCHAR szSql[SIZE_BUFF_2X];
+    int cnt = 0;
+    char val1[101], val2[101];
+    char rec[SIZE_ITEM_L];
+    FILE *fp = NULL;
+
+    if ( (fp = fopen(map_file, "rt")) == NULL ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_BIZ_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+
+    memset(rec, 0x00, sizeof(rec));
+    while ( fgets(rec, SIZE_ITEM_S, fp) != NULL ) {
+
+        trimStr(rec);
+        if ( rec[0] == '#' ) {
+            continue;   // skip comment
+        }
+
+        char *p = strrchr(rec, '|');    // get only first field
+        if ( p != NULL ) {
+            *p = 0;
+        }
+
+        if ( *rec == '\0' ) {
+            continue;
+        }
+
+        //memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+        if ( chk_type == E_F_BIZ_TYPE ) {
+            // LOCATION_CD, PARTNER_BUSINESS_TYPE, NAME
+            sprintf((char*)szSql.arr,
+                "SELECT NVL(NAME, ''), NVL(PARTNER_BUSINESS_TYPE, '') "\
+                "FROM SFF_PARTNER_DIVISION "\
+                "WHERE "\
+                "LOCATION_CD = '%s' "\
+                "AND PARTNER_STATUS = 'Active Partner' "\
+                "AND (NAME LIKE 'VAN%c' OR PARTNER_BUSINESS_TYPE LIKE '%c%s%c') ", key, PERCENT_SIGN, PERCENT_SIGN, rec, PERCENT_SIGN);
+//printf("1 rec = '%s', '%c%s%c'\n", rec, PERCENT_SIGN, rec, PERCENT_SIGN);
+        }
+        else if ( chk_type == E_F_ORD_TYPE ) {
+            sprintf((char*)szSql.arr,
+                "SELECT NVL(MOBILE_NO, ''), NVL(LOCATION_NAME, '') "\
+                "FROM ORDER_MASTER "\
+                "WHERE MOBILE_NO = '%s' "\
+                "AND SIEBELORDERTYPE LIKE '%c%s%c' "\
+                "AND (SYSDATE - RECORDDATE) BETWEEN 0 AND 65 ", key, PERCENT_SIGN, rec, PERCENT_SIGN);
+//printf("2 rec = '%s', '%c%s%c'\n", rec, PERCENT_SIGN, rec, PERCENT_SIGN);
+        }
+        else {
+            fclose(fp); fp = NULL;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_BIZ_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+            return FAILED;
+        }
+        //memset((char*)szSql.arr, 0x00, sizeof((char*)szSql.arr));
+        //strcpy((char*)szSql.arr, gszTmpSql);
+        szSql.len = strlen((char*)szSql.arr);
+        writeLog(LOG_DB2, (char*)szSql.arr);
+//printf("1) [%s] (%d)\n", gszTmpSql, strlen(gszTmpSql));
+//printf("\t2) [%s] (%d)\n\n", (char*)szSql.arr, szSql.len);
+
+        memset(rec, 0x00, sizeof(rec));
+
+        EXEC SQL AT SFN_DB PREPARE oraRejStmt FROM :szSql;
+        EXEC SQL AT SFN_DB DECLARE oraRejCrs CURSOR FOR oraRejStmt;
+        EXEC SQL AT SFN_DB OPEN oraRejCrs;
+
+        if ( sqlca.sqlcode < SUCCESS ) {
+            writeLog(LOG_ERR, "checkRejBizOrd: Ora(%d) Open oraRejCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            EXEC SQL AT SFN_DB CLOSE oraRejCrs;
+            fclose(fp); fp = NULL;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_BIZ_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+            return FAILED;
+        }
+
+        memset(val1, 0x00, sizeof(val1));
+        memset(val2, 0x00, sizeof(val2));
+        while ( TRUE ) {
+
+            EXEC SQL AT SFN_DB FETCH oraRejCrs INTO :val1, :val2;
+
+            if ( sqlca.sqlcode == NOT_FOUND ) {
+                break;
+            }
+            cnt++;
+            trimStr(val1);
+            trimStr(val2);
+            if ( chk_type == E_F_BIZ_TYPE ) {
+                if ( *val2 == '\0' ) {
+                    strcpy(channel_type, val1);
+                }
+                else {
+                    strcpy(channel_type, val2);
+                }
+            }
+        }
+        EXEC SQL AT SFN_DB CLOSE oraRejCrs;
+        if ( cnt > 0 ) {
+            writeLog(LOG_DB3, "checkRejBizOrd: %s found rejected %s, %s", ( chk_type == E_F_BIZ_TYPE ? "BizType" : "OrdType" ), key, rec);
+            break;
+        }
+    }
+    fclose(fp); fp = NULL;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_BIZ_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return  (cnt > 0 ? SUCCESS : FAILED);
+}
+
+int getOrderInf(const char *mobNum, char *order_date, char *order_type)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_GET_ORD].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    char ord_date[SIZE_DATE_TIME+1], ord_type[31];
+    VARCHAR szSql[SIZE_BUFF_2X];
+    int result = FAILED;
+
+    // MOBILE_NO, SIEBELORDERTYPE, DEALER_CODE, DEALER_NAME
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT TO_CHAR(RECORDDATE, 'YYYYMMDDHH24MISS'), NVL(SIEBELORDERTYPE, '') "\
+        "FROM ORDER_MASTER WHERE MOBILE_NO = '%s' AND SYSDATE - RECORDDATE <= 45", mobNum);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+
+    EXEC SQL AT SFN_DB PREPARE oraOrdStmt FROM :szSql;
+    EXEC SQL AT SFN_DB DECLARE oraOrdCrs CURSOR FOR oraOrdStmt;
+    EXEC SQL AT SFN_DB OPEN oraOrdCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "getOrderInf: Ora(%d) Open oraSubCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraOrdCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_GET_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return result;
+    }
+
+    while ( TRUE ) {
+        memset(ord_date, 0x00, sizeof(ord_date));
+        memset(ord_type, 0x00, sizeof(ord_type));
+        EXEC SQL AT SFN_DB FETCH oraOrdCrs INTO :ord_date, :ord_type;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+
+        strcpy(order_date,   trimStr(ord_date));
+        strcpy(order_type,   trimStr(ord_type));
+        result = SUCCESS;
+        break;
+    }
+    EXEC SQL AT SFN_DB CLOSE oraOrdCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_GET_ORD].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return result;
+}
+
+
+int checkRejSvcPromo(int chk_type, const char *mobNum)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_SVC_PRM].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    char key_id[51], msg[50];
+    int result = FAILED;
+    VARCHAR szSql[SIZE_BUFF_2X];
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    if ( chk_type == E_F_SERVICE ) {
+        // A.MOBILE_NO, B.PRODUCT_ID
+        sprintf(gszTmpSql,
+            "SELECT B.PRODUCT_ID "\
+            "FROM SFF_ASSET_INSTANCE A "\
+            "JOIN SFF_ASSET_SERVICE_ITEM B ON A.ROW_ID = B.ASSET_INSTANCE_ID "\
+            "WHERE A.MOBILE_NO = '%s' ORDER BY B.STATUS_DT DESC ", mobNum);
+    }
+    else if ( chk_type == E_F_PROMO || chk_type == E_F_PROMO_FMC ) {
+        // A.MOBILE_NO, B.PROMOTION_ID, B.STATUS_DT
+#if 1
+        sprintf(gszTmpSql,
+            "SELECT B.PROMOTION_ID "\
+            "FROM SFF_ASSET_INSTANCE A "\
+            "JOIN SFF_ASSET_PROMOTION_ITEM B ON A.ROW_ID = B.ASSET_INSTANCE_ID "\
+            "WHERE A.MOBILE_NO = '%s' "\
+            "AND B.STATUS_CD = 'Active' ORDER BY B.STATUS_DT DESC ", mobNum);
+#else
+        sprintf(gszTmpSql,
+            "SELECT B.PROMOTION_ID "\
+            "FROM SFF_ASSET_INSTANCE A "\
+            "JOIN SFF_ASSET_PROMOTION_ITEM B ON A.ROW_ID = B.ASSET_INSTANCE_ID "\
+            "WHERE  B.STATUS_CD = 'Active' "\
+            "AND  (B.START_DT <= SYSDATE OR B.END_DT <= SYSDATE) "\
+            "AND  A.MOBILE_NO = '%s' ORDER BY B.STATUS_DT DESC ", mobNum);
+#endif
+    }
+    else {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_SVC_PRM].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+
+    EXEC SQL AT SFF_DB PREPARE oraSvcStmt FROM :szSql;
+    EXEC SQL AT SFF_DB DECLARE oraSvcCrs CURSOR FOR oraSvcStmt;
+    EXEC SQL AT SFF_DB OPEN oraSvcCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "checkRejSvcPromo: Ora(%d) Open oraSvcCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFF_DB CLOSE oraSvcCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_SVC_PRM].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+
+    while ( TRUE ) {
+        memset(key_id, 0x00, sizeof(key_id));
+        EXEC SQL AT SFF_DB FETCH oraSvcCrs INTO :key_id;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+
+        strcpy(key_id, trimStr(key_id));
+        if ( *key_id == '\0' ) {
+            continue;
+        }
+        if ( lookupMapTable(gszIniKeyCmnConf[chk_type], key_id) > 0 ) {
+
+            memset(msg, 0x00, sizeof(msg));
+            if ( chk_type == E_F_SERVICE )
+                strcpy(msg, "service id");
+            else if ( chk_type == E_F_PROMO )
+                strcpy(msg, "promotion id");
+            else
+                strcpy(msg, "FMC promotion id");
+
+            writeLog(LOG_DB3, "checkRejSvcPromo: %s %s found rejected", msg, key_id);
+            result = SUCCESS;
+            break;
+        }
+
+    }
+    EXEC SQL AT SFF_DB CLOSE oraSvcCrs;
+
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_SVC_PRM].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return result;
+
+}
+
+int checkProjFMC(const char *mobNum)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_PRJ_FMC].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    int cnt = 0;
+    VARCHAR szSql[SIZE_BUFF_2X];
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT COUNT(1) "\
+        "FROM SFF_ASSET_INSTANCE "\
+        "WHERE MOBILE_NO = '%s' "\
+        "AND STATUS_CD = 'Active' "\
+        "AND MAIN_PROMO_BRAND LIKE 'FMC%c' ", mobNum, PERCENT_SIGN);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+//printf("1) [%s]\n", gszTmpSql);
+//printf("\t2) [%s]\n\n", (char*)szSql.arr);
+
+    EXEC SQL AT SFF_DB PREPARE oraPrjStmt FROM :szSql;
+    EXEC SQL AT SFF_DB DECLARE oraPrjCrs CURSOR FOR oraPrjStmt;
+    EXEC SQL AT SFF_DB OPEN oraPrjCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "checkProjFMC: Ora(%d) Open oraPrjCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFF_DB CLOSE oraPrjCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRJ_FMC].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return FAILED;
+    }
+
+    while ( TRUE ) {
+
+        EXEC SQL AT SFF_DB FETCH oraPrjCrs INTO :cnt;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+        break;
+
+    }
+    EXEC SQL AT SFF_DB CLOSE oraPrjCrs;
+
+    if ( cnt > 0 ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRJ_FMC].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return SUCCESS;
+    }
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRJ_FMC].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return FAILED;
+
+}
+
+int isLuckyNum(const char *mobNum, char *is_lucky)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_PRT_LCK].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    char class_code[31], lucky_flg[31];
+    int result = FAILED;
+    VARCHAR szSql[SIZE_BUFF_2X];
+
+    *is_lucky = 'Y';
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    sprintf(gszTmpSql,
+        "SELECT NVL(CLASSIFY_CODE, 'NULL'), NVL(AIS_LUCKY_FLG, 'NULL') "\
+        "FROM SFF_NUMBER "\
+        "WHERE MOBILE_NO = '%s'", mobNum);
+    strcpy((char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+
+    EXEC SQL AT SFF_DB PREPARE oraLkyStmt FROM :szSql;
+    EXEC SQL AT SFF_DB DECLARE oraLkyCrs CURSOR FOR oraLkyStmt;
+    EXEC SQL AT SFF_DB OPEN oraLkyCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "isLuckyNum: Ora(%d) Open oraLkyCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFF_DB CLOSE oraLkyCrs;
+        *is_lucky = 'N';
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRT_LCK].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return result;
+    }
+
+    while ( TRUE ) {
+
+        memset(class_code, 0x00, sizeof(class_code));
+        memset(lucky_flg, 0x00, sizeof(lucky_flg));
+
+        EXEC SQL AT SFF_DB FETCH oraLkyCrs INTO :class_code, :lucky_flg;
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            *is_lucky = 'N';
+            break;
+        }
+
+        result = SUCCESS;
+        break;
+
+    }
+    EXEC SQL AT SFF_DB CLOSE oraLkyCrs;
+
+    if ( strncmp(class_code, "Normal", 6) == 0 && strncmp(lucky_flg, "NULL", 4) == 0 ) {
+        *is_lucky = 'N';    // accept only when class_code == Normal and luck_fg == NULL
+    }
+
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRT_LCK].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return result;
+
+}
+
+int checkCqsUsage(const char *mobNum, char cond_inf[][SIZE_ITEM_L])
+{
+struct timespec start_t, stop_t;
+proc_stat[E_CQS_USG].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    long charge, duration, volume;
+    long up_chg, lw_chg, up_dur, lw_dur, up_vol, lw_vol;
+    int result = FAILED;
+    char cond_rec[SIZE_ITEM_M], *item[10];
+    VARCHAR szSql[SIZE_BUFF_2X];
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+
+    sprintf(gszTmpSql, "SELECT SUM(SUM_CHG), SUM(SUM_DUR), SUM(SUM_VOL) FROM ( "\
+    "SELECT (NVL(DATA_PCHARGE, 0)  + NVL(VOICE_IDD_PCHARGE, 0) + NVL(IDD_MARI_PCHARGE, 0) + NVL(VOICE_MARI_PCHARGE, 0) + NVL(SMS_PCHARGE, 0) + NVL(SMS_MARI_PCHARGE, 0) + NVL(VAS_PCHARGE, 0) + NVL(GOOD_PCHARGE, 0) + NVL(VOICE_LOCAL_PCHARGE, 0) + NVL(VOICE_PRS_PCHARGE, 0) + NVL(WIFI_PCHARGE, 0) + NVL(IR_PCHARGE, 0)) SUM_CHG "\
+         ", (NVL(VOICE_IDD_DUR, 0) + NVL(IDD_MARI_DUR, 0) + NVL(VOICE_MARI_DUR, 0) + NVL(VOICE_LOCAL_DUR, 0)) SUM_DUR "\
+         ", (NVL(DATA_VOLUME, 0)) SUM_VOL "\
+         "FROM V_CDR_CURRENT_USAGE_CHARGE C "\
+         "WHERE  MOBILE_NUMBER =  '%s' "\
+    "UNION "\
+    "SELECT (NVL(DATA_PCHARGE, 0)  + NVL(VOICE_IDD_PCHARGE, 0) + NVL(IDD_MARI_PCHARGE, 0) + NVL(VOICE_MARI_PCHARGE, 0) + NVL(SMS_PCHARGE, 0) + NVL(SMS_MARI_PCHARGE, 0) + NVL(VAS_PCHARGE, 0) + NVL(GOOD_PCHARGE, 0) + NVL(VOICE_LOCAL_PCHARGE, 0) + NVL(VOICE_PRS_PCHARGE, 0) + NVL(WIFI_PCHARGE, 0) + NVL(IR_PCHARGE, 0)) SUM_CHG  "\
+         ", (NVL(VOICE_IDD_DUR, 0) + NVL(IDD_MARI_DUR, 0) + NVL(VOICE_MARI_DUR, 0) + NVL(VOICE_LOCAL_DUR, 0)) SUM_DUR "\
+         ", (NVL(DATA_VOLUME, 0)) SUM_VOL "\
+         "FROM V_CDR_PREVIOUS_USAGE_CHARGE P "\
+         "WHERE  MOBILE_NUMBER = '%s' ) ", mobNum, mobNum);
+
+    strcpy( (char*)szSql.arr, gszTmpSql);
+    szSql.len = strlen((char*)szSql.arr);
+    writeLog(LOG_DB1, gszTmpSql);
+
+    EXEC SQL AT SFN_DB PREPARE oraCqsStmt FROM :szSql;
+    EXEC SQL AT SFN_DB DECLARE oraCqsCrs CURSOR FOR oraCqsStmt;
+    EXEC SQL AT SFN_DB OPEN oraCqsCrs;
+
+    if ( sqlca.sqlcode < SUCCESS ) {
+        writeLog(LOG_ERR, "checkCqsUsage: Ora(%d) Open oraCqsCrs Error (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+        EXEC SQL AT SFN_DB CLOSE oraCqsCrs;
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+        return result;
+    }
+
+    while ( TRUE ) {
+
+        charge = 0;
+        duration = 0;
+        volume = 0;
+
+        EXEC SQL AT SFN_DB FETCH oraCqsCrs INTO :charge, :duration, :volume;
+
+        if ( sqlca.sqlcode == NOT_FOUND ) {
+            break;
+        }
+        result = SUCCESS;
+        break;
+
+    }
+    EXEC SQL AT SFN_DB CLOSE oraCqsCrs;
+
+    int num_item = 0;
+    if ( result == SUCCESS ) {
+        if ( cond_inf[E_CQS_MAX_CHG][0] != '\0' ) {
+            strcpy(cond_rec, cond_inf[E_CQS_MAX_CHG]);
+            num_item = getTokenAll(item, 10, cond_rec, ',');
+            writeLog(LOG_DB2, "cqs charge %ld, ini %ld", charge, atol(item[0]));
+            if ( *item[1] == '\0' )  {
+                if ( charge > atol(item[0]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+            else {
+                writeLog(LOG_DB2, "cqs charge %ld, ini %ld,%ld", charge, atol(item[0]), atol(item[1]));
+                if ( charge >= atol(item[0]) && charge <= atol(item[1]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+        }
+        if ( cond_inf[E_CQS_MAX_DUR][0] != '\0' ) {
+            strcpy(cond_rec, cond_inf[E_CQS_MAX_DUR]);
+            num_item = getTokenAll(item, 10, cond_rec, ',');
+            writeLog(LOG_DB2, "cqs duration %ld, ini %ld", duration, atol(item[0]));
+            if ( *item[1] == '\0' )  {
+                if ( duration > atol(item[0]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+            else {
+                writeLog(LOG_DB2, "cqs duration %ld, ini %ld,%ld", duration, atol(item[0]), atol(item[1]));
+                if ( duration >= atol(item[0]) && duration <= atol(item[1]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+        }
+        if ( cond_inf[E_CQS_MAX_VOL][0] != '\0' ) {
+            strcpy(cond_rec, cond_inf[E_CQS_MAX_VOL]);
+            num_item = getTokenAll(item, 10, cond_rec, ',');
+            writeLog(LOG_DB2, "cqs volume %ld, ini %ld", volume, atol(item[0]));
+            if ( *item[1] == '\0' ) {
+                if ( volume > atol(item[0]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+            else {
+                writeLog(LOG_DB2, "cqs volume %ld, ini %ld,%ld", volume, atol(item[0]), atol(item[1]));
+                if ( volume >= atol(item[0]) && volume <= atol(item[1]) ) {
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+                    return SUCCESS;
+                }
+            }
+        }
+    }
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_CQS_USG].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return FAILED;
+
+}
+
+
+int calcBillDate(char *szStartBillDate, char *szEndBillDate, int iBillCycle, int iRelativeMonth)
+{
+    struct  timeval stTv;
+    struct  tm      stTmResult;
+    if ( gettimeofday(&stTv, NULL) ) {  /* Failure */
+        /* errno already set by gettimeofday function */
+        return FAILED;
+    }
+    if ( localtime_r(&(stTv.tv_sec), &stTmResult) == NULL ) {
+        return FAILED;
+    }
+    return (_calcBillDate(szStartBillDate, szEndBillDate, iBillCycle, iRelativeMonth, &stTmResult));
+}
+
+int _calcBillDate(char *szStartBillDate, char *szEndBillDate, int iBillCycle, int iRelativeMonth, const struct tm *pstTmCurrDate)
+{
+    struct  tm  stTmResult,stTmTmp;
+    size_t  uiSize;
+    time_t  tTime;
+    int     iBillStartDD;
+
+    if ( szStartBillDate == NULL || szEndBillDate == NULL || pstTmCurrDate == NULL ) {
+        errno = EINVAL;
+        return FAILED;
+    }
+    memcpy(&stTmTmp, pstTmCurrDate, sizeof(struct tm));
+
+    /* Calculate Bill Start Date */
+    iBillStartDD = ((iBillCycle - 10) * 4) % 31;
+    if ( stTmTmp.tm_mday < iBillStartDD ) {
+        stTmTmp.tm_mon--;
+    }
+    stTmTmp.tm_mday = iBillStartDD;
+    stTmTmp.tm_mon += iRelativeMonth;
+    tTime = mktime(&stTmTmp);
+    localtime_r(&tTime, &stTmResult);
+    if ( (uiSize = strftime(szStartBillDate, SIZE_DATE_ONLY+1, "%Y%m%d", &stTmResult)) == 0 ) {
+        return FAILED;
+    }
+
+    /* Calculate Bill End Date */
+    stTmTmp.tm_mon++;
+    stTmTmp.tm_mday--;
+    tTime = mktime(&stTmTmp);
+    localtime_r(&tTime, &stTmResult);
+    if ((uiSize = strftime(szEndBillDate, SIZE_DATE_ONLY+1, "%Y%m%d", &stTmResult)) == 0) {
+        return FAILED;
+    }
+    return SUCCESS;
+}
+
+int openExcelFile(const char *tmplt_file, const char *tmp_dir, const char *out_dir, const char *fname, const char *suffix, int run_type)
+{
+    gfpSheet1 = NULL;
+    gfpSheet2 = NULL;
+    gfpSheetSme1 = NULL;
+    gfpSheetSme2 = NULL;
+
+    char _subtype[5];
+    char tmp_time[20];
+    char cmd[SIZE_ITEM_X];
+
+    memset(tmp_time, 0x00, sizeof(tmp_time));
+    strcpy(tmp_time, getSysDTM(DTM_TIME_FORM));
+    sprintf(gszDtmExcel, "%sT%sZ", getSysDTM(DTM_DATE_FORM), tmp_time);
+
+    memset(_subtype, 0x00, sizeof(_subtype));
+    memset(gszTmpFileNameSme1, 0x00, sizeof(gszTmpFileNameSme1));
+    memset(gszTmpFileNameSme2, 0x00, sizeof(gszTmpFileNameSme2));
+    memset(gszOutFileNameSme, 0x00, sizeof(gszOutFileNameSme));
+
+    if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+        strcpy(_subtype, ALRT2_RES);
+
+        sprintf(gszTmpFileNameSme1, "%s/%s%s%s.tmp1", tmp_dir, fname, ALRT2_SME, suffix);
+        sprintf(gszTmpFileNameSme2, "%s/%s%s%s.tmp2", tmp_dir, fname, ALRT2_SME, suffix);
+        sprintf(gszOutFileNameSme,  "%s/%s%s%s",      out_dir, fname, ALRT2_SME, suffix);
+
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "cat %s > %s", tmplt_file, gszTmpFileNameSme1);
+        system(cmd);
+
+        if ( (gfpSheetSme1 = fopen(gszTmpFileNameSme1, "at")) == NULL ) {
+            writeLog(LOG_SYS, "openExcelFile: unable to open file %s (%s)", gszTmpFileNameSme1, strerror(errno));
+            return FAILED;
+        }
+        if ( (gfpSheetSme2 = fopen(gszTmpFileNameSme2, "at")) == NULL ) {
+            writeLog(LOG_SYS, "openExcelFile: unable to open file %s (%s)", gszTmpFileNameSme2, strerror(errno));
+            return FAILED;
+        }
+        fprintf(gfpSheetSme2, "%s\n", SHEET2_HEADER);
+    }
+
+    memset(gszTmpFileName1, 0x00, sizeof(gszTmpFileName1));
+    memset(gszTmpFileName2, 0x00, sizeof(gszTmpFileName2));
+    memset(gszOutFileName, 0x00, sizeof(gszOutFileName));
+
+    sprintf(gszTmpFileName1, "%s/%s%s%s.tmp1", tmp_dir, fname, _subtype, suffix);
+    sprintf(gszTmpFileName2, "%s/%s%s%s.tmp2", tmp_dir, fname, _subtype, suffix);
+    sprintf(gszOutFileName,  "%s/%s%s%s",      out_dir, fname, _subtype, suffix);
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "cat %s > %s", tmplt_file, gszTmpFileName1);
+    system(cmd);
+
+    if ( (gfpSheet1 = fopen(gszTmpFileName1, "at")) == NULL ) {
+        writeLog(LOG_SYS, "openExcelFile: unable to open file %s (%s)", gszTmpFileName1, strerror(errno));
+        return FAILED;
+    }
+    if ( (gfpSheet2 = fopen(gszTmpFileName2, "at")) == NULL ) {
+        writeLog(LOG_SYS, "openExcelFile: unable to open file %s (%s)", gszTmpFileName2, strerror(errno));
+        return FAILED;
+    }
+    fprintf(gfpSheet2, "%s\n", SHEET2_HEADER);
+
+    return SUCCESS;
+
+}
+
+int closeExcelFile(int run_type)
+{
+    char cmd[SIZE_ITEM_X];
+    char tmp[30];
+
+    if ( gfpSheet1 != NULL ) {
+        fprintf(gfpSheet1, "%s\n", END_OF_REPORT);
+        fprintf(gfpSheet1, "%s\n", SHEET1_TRAILER);
+        fclose(gfpSheet1);  gfpSheet1 = NULL;
+    }
+    if ( gfpSheet2 != NULL ) {
+        fprintf(gfpSheet2, "%s\n", END_OF_REPORT);
+        fprintf(gfpSheet2, "%s\n", SHEET2_TRAILER);
+        fclose(gfpSheet2);  gfpSheet2 = NULL;
+    }
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "cat %s >> %s", gszTmpFileName2, gszTmpFileName1);
+    system(cmd);
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "rm -f %s", gszTmpFileName2);
+    system(cmd);
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "mv %s %s", gszTmpFileName1, gszOutFileName);
+    system(cmd);
+
+    memset(tmp, 0x00, sizeof(tmp));
+    strcpy(tmp, strReplaceAll(gszDtmExcel, "/", "\\/"));
+
+    memset(cmd, 0x00, sizeof(cmd));
+    sprintf(cmd, "sed -i 's/$CREATE_DATE/%s/g' %s", tmp, gszOutFileName);
+    system(cmd);
+
+    writeLog(LOG_INF, "report output file %s", gszOutFileName);
+
+    if ( run_type == E_ALERT2 || run_type == E_ALERT4 ) {
+
+        if ( gfpSheetSme1 != NULL ) {
+            fprintf(gfpSheetSme1, "%s\n", END_OF_REPORT);
+            fprintf(gfpSheetSme1, "%s\n", SHEET1_TRAILER);
+            fclose(gfpSheetSme1); gfpSheetSme1 = NULL;
+        }
+        if ( gfpSheetSme2 != NULL ) {
+            fprintf(gfpSheetSme2, "%s\n", END_OF_REPORT);
+            fprintf(gfpSheetSme2, "%s\n", SHEET2_TRAILER);
+            fclose(gfpSheetSme2); gfpSheetSme2 = NULL;
+        }
+
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "cat %s >> %s", gszTmpFileNameSme2, gszTmpFileNameSme1);
+        system(cmd);
+
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "rm -f %s", gszTmpFileNameSme2);
+        system(cmd);
+
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "mv %s %s", gszTmpFileNameSme1, gszOutFileNameSme);
+        system(cmd);
+
+        memset(cmd, 0x00, sizeof(cmd));
+        sprintf(cmd, "sed -i 's/$CREATE_DATE/%s/g' %s", tmp, gszOutFileNameSme);
+        system(cmd);
+
+        writeLog(LOG_INF, "report output file %s", gszOutFileNameSme);
+    }
+
+    return SUCCESS;
+
+}
+
+char *changeDateFoExcel(const char *yyyymmddhhmmss)
+{
+    // excel in this version requires date time in format of yyyy-mm-dd<T>HH:MM:SS.000 (25 chars)
+    static char full_date[30];
+    char y[5], m[3], d[3], H[3], M[3], S[3];
+    memset(y, 0x00, sizeof(y)); memset(H, 0x00, sizeof(H));
+    memset(m, 0x00, sizeof(m)); memset(M, 0x00, sizeof(M));
+    memset(d, 0x00, sizeof(d)); memset(S, 0x00, sizeof(S));
+    memset(full_date, 0x00, sizeof(full_date));
+    int slen = strlen(yyyymmddhhmmss);
+
+    if ( *yyyymmddhhmmss == '\0' ) {
+        return full_date;   // empty string
+    }
+
+    strcpy(H, "00"); strcpy(M, "00"); strcpy(S, "00");
+
+    strncpy(y, yyyymmddhhmmss, 4);
+    strncpy(m, yyyymmddhhmmss+4, 2);
+    strncpy(d, yyyymmddhhmmss+6, 2);
+    if ( slen > SIZE_DATE_ONLY ) {
+        strncpy(H, yyyymmddhhmmss+8, 2);
+        strncpy(M, yyyymmddhhmmss+10, 2);
+        strncpy(S, yyyymmddhhmmss+12, 2);
+    }
+    sprintf(full_date, "%s-%s-%sT%s:%s:%s.000", y, m, d, H, M, S);
+    return full_date;
+}
+
+void logDbUpdateInfo(const char *repname)
+{
+    VARCHAR szSql[SIZE_BUFF_2X];
+    long lSeqNo;
+
+    memset(gszTmpSql, 0x00, sizeof(gszTmpSql));
+    if ( glSeqNumber <= 0 ) {
+        sprintf(gszTmpSql, "INSERT INTO LOGUPDATE (NCONTROL, CPATH, CFILENAME, CSTATUS, CREMARK, NRECORD, NERROR, DTUPDATE) "\
+                "VALUES('%s', '%s', '%s', '%s', '%s', %d, %d, SYSDATE) "
+                , gst_log_db.szName
+                , gst_log_db.szPath
+                , repname
+                , gst_log_db.szStatus
+                , gst_log_db.szRemark
+                , gst_log_db.nMapRec
+                , gst_log_db.nRejRec );
+        strcpy((char*)szSql.arr, gszTmpSql);
+        szSql.len = strlen((char*)szSql.arr);
+        writeLog(LOG_DB2, gszTmpSql);
+
+        EXEC SQL AT SFN_DB EXECUTE IMMEDIATE :szSql;
+        if ( sqlca.sqlcode != SUCCESS ) {
+            EXEC SQL AT SFN_DB ROLLBACK;
+            writeLog(LOG_ERR, "logDbUpdateInfo: Ora(%d) error insert log (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            return;
+        }
+        EXEC SQL AT SFN_DB SELECT LOGUPDATE_SEQ.CURRVAL INTO :lSeqNo FROM DUAL;
+        if ( sqlca.sqlcode != SUCCESS ) {
+            EXEC SQL AT SFN_DB ROLLBACK;
+            writeLog(LOG_ERR, "logDbUpdateInfo: Ora(%d) unable to get current seq no (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            return;
+        }
+        glSeqNumber = lSeqNo;
+        writeLog(LOG_DB2, "logupdate: INSERT %s curr seq %ld", gst_log_db.szName, glSeqNumber);
+//printf("INS gst_log_db.lSeqNo = %ld, %ld, %ld\n", gst_log_db.lSeqNo, lSeqNo, glSeqNumber);
+        EXEC SQL AT SFN_DB COMMIT WORK;
+    }
+    else {
+        writeLog(LOG_DB2, "logupdate: UPDATE %s curr seq %ld", gst_log_db.szName, glSeqNumber);
+        sprintf(gszTmpSql, "UPDATE LOGUPDATE SET "\
+                "CSTATUS = '%s', CREMARK = '%s', NRECORD = %d, NERROR = %d, DTUPDATE = SYSDATE "\
+                "WHERE NLOGID = %ld AND NCONTROL = '%s' "
+                , gst_log_db.szStatus
+                , gst_log_db.szRemark
+                , gst_log_db.nMapRec
+                , gst_log_db.nRejRec
+                , glSeqNumber
+                , gst_log_db.szName );
+        strcpy((char*)szSql.arr, gszTmpSql);
+        szSql.len = strlen((char*)szSql.arr);
+        writeLog(LOG_DB2, gszTmpSql);
+//printf("UPD gst_log_db.lSeqNo = %ld, %ld\n", lSeqNo, glSeqNumber);
+        EXEC SQL AT SFN_DB EXECUTE IMMEDIATE :szSql;
+        if ( sqlca.sqlcode != SUCCESS ) {
+            writeLog(LOG_ERR, "logDbUpdateInfo: Ora(%d) error update log (%s)", sqlca.sqlcode, trimStr((unsigned char*)sqlca.sqlerrm.sqlerrmc));
+            return;
+        }
+        EXEC SQL AT SFN_DB COMMIT WORK;
+    }
+}
+
+void sendMail(const char *subject, const char *content_file, const char *attach1, const char *attach2, const char *mail_list, const char *mail_app)
+{
+    FILE *fp = NULL;
+    char email[SIZE_ITEM_S], cmd[SIZE_BUFF];
+    char sendmail_ini[SIZE_ITEM_L], tmp[SIZE_ITEM_L];
+    char attach_list[SIZE_BUFF];
+
+    memset(tmp, 0x00, sizeof(tmp));
+    memset(email, 0x00, sizeof(email));
+    memset(sendmail_ini, 0x00, sizeof(sendmail_ini));
+
+    fp = fopen(mail_list, "rt");
+    if ( fp == NULL ) {
+        writeLog(LOG_ERR, "unable to read mailing list file: %s", mail_list);
+        return;
+    }
+    if ( access(mail_app, F_OK|R_OK) != SUCCESS ) {
+        writeLog(LOG_ERR, "unable to access send mail app: %s", mail_app);
+        return;
+    }
+
+    strcpy(tmp, mail_app);
+    char *p = strrchr(tmp, '/'); *p = 0;
+    sprintf(sendmail_ini, "%s/sendmailcli.ini", tmp);
+
+    memset(attach_list, 0x00, sizeof(attach_list));
+    if ( *attach2 != '\0' ) {
+        sprintf(attach_list, "--attach %s --attach %s", attach1, attach2);
+    }
+    else {
+        sprintf(attach_list, "--attach %s", attach1);
+    }
+
+    while ( (fgets(email, SIZE_ITEM_S, fp)) != NULL ) {
+        memset(cmd, 0x00, sizeof(cmd));
+        trimStr(email);
+
+        if ( *email == '#' || *email == '\0' || *email == ' ' ) {  // skip comment out email
+            continue;
+        }
+
+        sprintf(cmd, "java -jar %s --to %s --subject \"%s\" --content_file %s %s --config %s"
+            , mail_app
+            , email
+            , subject
+            , content_file
+            , attach_list
+            , sendmail_ini );
+        writeLog(LOG_DBG, "sendmail with command: %s", cmd);
+        system(cmd);
+        if ( *attach2 != '\0' ) {
+            writeLog(LOG_INF, "sendmail to %s, attach %s, %s", email, attach1, attach2);
+        }
+        else {
+            writeLog(LOG_INF, "sendmail to %s, attach %s", email, attach1);
+        }
+        memset(email, 0x00, sizeof(email));
+    }
+    fclose(fp);
+
+}
+
+int regCompPretty(const char *pattern_file)
+{
+    int i = 0;
+    const char *error;
+    int erroffset;
+    FILE *fp = NULL;
+
+    fp = fopen(pattern_file, "rt");
+    if ( fp == NULL ) {
+        writeLog(LOG_ERR, "enable to open %s: %s", pattern_file, strerror(errno));
+        return FAILED;
+    }
+
+    gnTotalPattern = 0;
+
+    char line[SIZE_BUFF], pat_str[PAT_LEN], pat_cod[COD_LEN];
+    memset(line, 0x00, sizeof(line));
+
+    while ( fgets(line, 1024, fp) != NULL ) {
+
+        trimStr(line);
+        if ( *line == '#' ||  *line == ';' || *line == '\0' ) {
+            continue;
+        }
+
+        memset(pat_str, 0x00, sizeof(pat_str)); memset(pat_cod, 0x00, sizeof(pat_cod));
+        getTokenItem(line, 1, ';', pat_str);    getTokenItem(line, 2, ';', pat_cod);
+        trimStr(pat_str);                       trimStr(pat_cod);
+
+        strcpy(gsPattern[i].pattern, pat_str);
+        strcpy(gsPattern[i].patcode, pat_cod);
+
+        gsPattern[i].pcrepat = pcre_compile(gsPattern[i].pattern, 0, &error, &erroffset, NULL);
+        if ( gsPattern[i].pcrepat == NULL ) {
+            writeLog(LOG_ERR, "regex compilation of '%s' failed at offset %d: %s", gsPattern[i].pattern, erroffset, error);
+            continue;
+        }
+        //printf("%03d %s\t%s\n", i+1, pattern[i].pattern, pattern[i].patcode);
+        i++;
+        memset(line, 0x00, sizeof(line));
+
+    }
+    fclose(fp);
+    gnTotalPattern = i;
+
+    for ( i=0; i<gnTotalPattern; i++ ) {
+        writeLog(LOG_DBG, "%-3d pattern code %05s, pattern %-50s", i, gsPattern[i].patcode, gsPattern[i].pattern);
+    }
+    writeLog(LOG_INF, "total pretty pattern %d loaded", gnTotalPattern);
+
+    return gnTotalPattern;
+
+}
+
+void regFreePretty(int nsize)
+{
+    int i;
+    for ( i = 0; i < nsize ; i++ ) {
+        free(gsPattern[i].pcrepat);
+    }
+    writeLog(LOG_INF, "freed up compiled regex");
+}
+
+int isPrettyNum(const char *mobNum, char *is_pretty)
+{
+struct timespec start_t, stop_t;
+proc_stat[E_PRT_PRT].n_call_count++;
+clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
+
+    int i, result = FAILED, ovector[OVECCOUNT];
+    *is_pretty = 'N';
+
+    for ( i = 0; i < gnTotalPattern ; i++ ) {
+        int rc = pcre_exec(gsPattern[i].pcrepat, NULL, mobNum, strlen(mobNum), 0, 0, ovector, OVECCOUNT);
+        if ( rc >= 0 ) {
+            //printf("%s MATCH %s\n", argv[1], gsPattern[i].pattern);
+            *is_pretty = 'Y';
+            result = SUCCESS;
+            writeLog(LOG_DB3, "mobile_no '%s' match '%s' : '%s'", mobNum, gsPattern[i].pattern, gsPattern[i].patcode);
+            break;
+        }
+        //else {
+            //if ( rc == PCRE_ERROR_NOMATCH ) {
+            //    printf("Sorry, no match\n");
+            //}
+            //else {
+            //    printf("Matching error %d\n", rc);
+            //}
+        //}
+    }
+clock_gettime(CLOCK_MONOTONIC_RAW, &stop_t);
+proc_stat[E_PRT_PRT].l_sum_use_ms += get_millsec_delta(&stop_t, &start_t);
+    return result;
+}

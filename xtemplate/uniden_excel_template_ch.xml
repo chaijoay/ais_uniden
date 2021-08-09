@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="TIS-620"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+xmlns:o="urn:schemas-microsoft-com:office:office"
+xmlns:x="urn:schemas-microsoft-com:office:excel"
+xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+xmlns:html="http://www.w3.org/TR/REC-html40">
+<DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">
+<Author>UnidentSubscriberReport</Author>
+<LastAuthor>UnidentSubscriberReport</LastAuthor>
+<Created>$CREATE_DATE</Created>
+<LastSaved>$CREATE_DATE</LastSaved>
+<Version>16.00</Version>
+</DocumentProperties>
+<OfficeDocumentSettings xmlns="urn:schemas-microsoft-com:office:office">
+<AllowPNG/>
+</OfficeDocumentSettings>
+<ExcelWorkbook xmlns="urn:schemas-microsoft-com:office:excel">
+<WindowHeight>8976</WindowHeight>
+<WindowWidth>23040</WindowWidth>
+<WindowTopX>32767</WindowTopX>
+<WindowTopY>32767</WindowTopY>
+<ProtectStructure>False</ProtectStructure>
+<ProtectWindows>False</ProtectWindows>
+</ExcelWorkbook>
+<Styles>
+<Style ss:ID="Default" ss:Name="Normal">
+<Alignment ss:Vertical="Bottom"/>
+<Borders/>
+<Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#000000"/>
+<Interior/>
+<NumberFormat/>
+<Protection/>
+</Style>
+<Style ss:ID="m1601721466160">
+<Alignment ss:Horizontal="Center" ss:Vertical="Bottom"/>
+<Borders>
+<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+</Borders>
+</Style>
+<Style ss:ID="s62">
+<Borders>
+<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+</Borders>
+<Interior ss:Color="#92D050" ss:Pattern="Solid"/>
+</Style>
+<Style ss:ID="s63">
+<Borders>
+<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+</Borders>
+</Style>
+<Style ss:ID="s64">
+<Borders>
+<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1"/>
+<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1"/>
+</Borders>
+<NumberFormat ss:Format="dd/mm/yyyy;@"/>
+</Style>
+<Style ss:ID="s65">
+<Font ss:FontName="Calibri" x:Family="Swiss" ss:Size="11" ss:Color="#000000"
+ss:Bold="1"/>
+</Style>
+</Styles>
+<Worksheet ss:Name="ALERT2"> 
+<Table ss:ExpandedColumnCount="10" ss:ExpandedRowCount="50000" x:FullColumns="1"
+x:FullRows="1" ss:DefaultRowHeight="15">
+<Column ss:Width="70"/>
+<Column ss:Width="80"/>
+<Column ss:Width="60"/>
+<Column ss:Width="60"/>
+<Column ss:Width="60"/>
+<Column ss:Width="60"/>
+<Column ss:Width="60"/>
+<Row ss:AutoFitHeight="0">
+<Cell ss:StyleID="s62"><Data ss:Type="String">Mobile No</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Activation Date</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Bill Cycle</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Bill Start Date</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">BA</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">BA Name</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Pretty Flag</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Dealer Location Code</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Dealer Name</Data></Cell>
+<Cell ss:StyleID="s62"><Data ss:Type="String">Channel Type</Data></Cell>
+</Row>
