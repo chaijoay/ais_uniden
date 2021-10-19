@@ -976,7 +976,8 @@ clock_gettime(CLOCK_MONOTONIC_RAW, &start_t);
             "SELECT B.PRODUCT_ID "\
             "FROM SFF_ASSET_INSTANCE A "\
             "JOIN SFF_ASSET_SERVICE_ITEM B ON A.ROW_ID = B.ASSET_INSTANCE_ID "\
-            "WHERE A.MOBILE_NO = '%s' ORDER BY B.STATUS_DT DESC ", mobNum);
+            "WHERE A.MOBILE_NO = '%s' "\
+            "AND B.STATUS_CD = 'Active' ORDER BY B.STATUS_DT DESC ", mobNum);
     }
     else if ( chk_type == E_F_PROMO || chk_type == E_F_PROMO_FMC ) {
         // A.MOBILE_NO, B.PROMOTION_ID, B.STATUS_DT
